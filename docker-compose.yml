@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:18
+    container_name: lfae-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: lfae
+      POSTGRES_USER: lfae_admin
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lfae_admin -d lfae"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres-data:
