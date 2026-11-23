@@ -1,18 +1,24 @@
 package com.lfae.api.exceptions;
 
+import org.jspecify.annotations.NonNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ProblemDetail;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.http.*;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.context.request.WebRequest;
+import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 
+import javax.naming.AuthenticationException;
+import java.nio.file.AccessDeniedException;
 import java.time.Instant;
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
-
-public class GlobalExceptionHandler {
+@RestControllerAdvice
+public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
 
     /**
@@ -29,25 +35,17 @@ public class GlobalExceptionHandler {
         return problemDetail;
     }
 
-    /**
-     * Captures validation errors from Spring (@Valid / DTOs)
-     */
-    @ExceptionHandler(MethodArgumentNotValidException.class)
-    public ProblemDetail handlerValidationException(MethodArgumentNotValidException ex) {
-        log.warn("Validation exception in request payload: {}", ex.getBindingResult().getObjectName());
-
-        Map<String, String> fieldErrors = new HashMap<String, String>();
-        ex.getBindingResult().getFieldErrors().forEach(err ->
-                fieldErrors.put(err.getField(), err.getDefaultMessage())
-        );
+    /** DB constraint violations that slipped past the business checks (races, future FKs...). */
+    @ExceptionHandler(DataIntegrityViolationException.class)
+    public ProblemDetail handleDataIntegrity(DataIntegrityViolationException ex) {
+        log.warn("Data integrity violation: {}", ex.getMostSpecificCause().getMessage());
 
         ProblemDetail problemDetail = ProblemDetail.forStatusAndDetail(
-                HttpStatus.BAD_REQUEST, "Validation failed for request"
+                HttpStatus.CONFLICT, "The operation violates a data integrity constraint."
         );
-        problemDetail.setTitle("VALIDATION_ERROR");
+        problemDetail.setTitle("DATA_INTEGRITY_VIOLATION");
         problemDetail.setProperty("timestamp", Instant.now());
-        problemDetail.setProperty("code", "VALIDATION_ERROR");
-        problemDetail.setProperty("fieldErrors", fieldErrors);
+        problemDetail.setProperty("code", "DATA_INTEGRITY_VIOLATION");
         return problemDetail;
     }
 
@@ -65,5 +63,61 @@ public class GlobalExceptionHandler {
         problemDetail.setProperty("timestamp", Instant.now());
         problemDetail.setProperty("code", "INTERNAL_SERVER_ERROR");
         return problemDetail;
+    }
+
+    /** Bean Validation errors (@Valid on @RequestBody). Overrides the Spring default. */
+    @Override
+    protected ResponseEntity<Object> handleMethodArgumentNotValid(
+            MethodArgumentNotValidException ex, @NonNull HttpHeaders headers,
+            @NonNull HttpStatusCode status, @NonNull WebRequest request) {
+        log.warn("Validation exception in request payload: {}", ex.getBindingResult().getObjectName());
+
+        Map<String, String> fieldErrors = new LinkedHashMap<>();
+        ex.getBindingResult().getFieldErrors().forEach(err ->
+                fieldErrors.putIfAbsent(err.getField(), err.getDefaultMessage())
+        );
+
+        ProblemDetail problemDetail = ProblemDetail.forStatusAndDetail(
+                HttpStatus.BAD_REQUEST, "Validation failed for request"
+        );
+        problemDetail.setTitle("VALIDATION_ERROR");
+        problemDetail.setProperty("timestamp", Instant.now());
+        problemDetail.setProperty("code", "VALIDATION_ERROR");
+        problemDetail.setProperty("fieldErrors", fieldErrors);
+        return ResponseEntity.status(status).headers(headers).body(problemDetail);
+    }
+
+    /** Adds timestamp/code to the rest of Spring MVC errors (400 malformed JSON, 405, 415...). */
+    @Override
+    protected ResponseEntity<Object> handleExceptionInternal(
+            @NonNull Exception ex, Object body, @NonNull HttpHeaders headers,
+            @NonNull HttpStatusCode statusCode, @NonNull WebRequest request) {
+        ResponseEntity<Object> response = super.handleExceptionInternal(ex, body, headers, statusCode, request);
+        if (response != null && response.getBody() instanceof ProblemDetail pd) {
+            HttpStatus resolved = HttpStatus.resolve(statusCode.value());
+            pd.setProperty("timestamp", Instant.now());
+            pd.setProperty("code", resolved != null ? resolved.name() : "ERROR");
+        }
+        return response;
+    }
+
+    @ExceptionHandler(AccessDeniedException.class)   // org.springframework.security.access
+    public ProblemDetail handleAccessDenied(AccessDeniedException ex) {
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(
+                HttpStatus.FORBIDDEN, "You do not have permission to perform this action.");
+        pd.setTitle("ACCESS_DENIED");
+        pd.setProperty("timestamp", Instant.now());
+        pd.setProperty("code", "ACCESS_DENIED");
+        return pd;
+    }
+
+    @ExceptionHandler(AuthenticationException.class) // org.springframework.security.core
+    public ProblemDetail handleAuthentication(AuthenticationException ex) {
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(
+                HttpStatus.UNAUTHORIZED, "Authentication is required.");
+        pd.setTitle("UNAUTHORIZED");
+        pd.setProperty("timestamp", Instant.now());
+        pd.setProperty("code", "UNAUTHORIZED");
+        return pd;
     }
 }
